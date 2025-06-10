@@ -49,11 +49,6 @@ class ConstructionMonitor:
         os.makedirs("camera_config", exist_ok=True)
         os.makedirs("models", exist_ok=True)
         
-        # Crear directorio para eventos por tipo
-        os.makedirs(os.path.join(self.config['alerts']['events_folder'], "vehiculos_entrada"), exist_ok=True)
-        os.makedirs(os.path.join(self.config['alerts']['events_folder'], "vehiculos_salida"), exist_ok=True)
-        os.makedirs(os.path.join(self.config['alerts']['events_folder'], "situaciones_riesgo"), exist_ok=True)
-        
         # Variables para el manejo de frames
         self.frame_queue = queue.Queue(maxsize=10)
         self.camera_process = None
@@ -1077,6 +1072,14 @@ class ConstructionMonitor:
             "informe_diario.html"
         )
         
+        # Obtener lista de todas las fechas disponibles
+        all_dates = self.list_event_dates()
+        
+        # Obtener índice de la fecha actual y fechas anterior/siguiente
+        current_index = all_dates.index(date_str) if date_str in all_dates else -1
+        prev_date = all_dates[current_index - 1] if current_index > 0 else None
+        next_date = all_dates[current_index + 1] if current_index >= 0 and current_index < len(all_dates) - 1 else None
+        
         # Generar HTML
         html_content = f"""
         <!DOCTYPE html>
@@ -1097,10 +1100,44 @@ class ConstructionMonitor:
                 .vehicle-exit {{ background-color: #fee; }}
                 .danger {{ background-color: #fdd; }}
                 img {{ max-width: 300px; max-height: 200px; border: 1px solid #ddd; }}
+                .date-nav {{ display: flex; justify-content: space-between; margin: 20px 0; }}
+                .date-nav a {{ padding: 8px 15px; background-color: #4CAF50; color: white; text-decoration: none; border-radius: 5px; }}
+                .date-nav a:hover {{ background-color: #45a049; }}
+                .date-nav a.disabled {{ background-color: #cccccc; cursor: not-allowed; }}
+                .date-selector {{ margin: 20px 0; padding: 10px; background-color: #f0f0f0; border-radius: 5px; }}
+                .date-selector select {{ padding: 5px; font-size: 16px; }}
             </style>
+            <script>
+                function cambiarFecha() {{
+                    var selector = document.getElementById('selector-fecha');
+                    var fechaSeleccionada = selector.value;
+                    if (fechaSeleccionada) {{
+                        window.location.href = '../' + fechaSeleccionada + '/informe_diario.html';
+                    }}
+                }}
+            </script>
         </head>
         <body>
             <h1>Informe de Eventos - {date_str}</h1>
+            
+            <!-- Navegación entre fechas -->
+            <div class="date-nav">
+                {f'<a href="../{prev_date}/informe_diario.html">← Día Anterior</a>' if prev_date else '<a class="disabled">← Día Anterior</a>'}
+                <div class="date-selector">
+                    <label for="selector-fecha">Seleccionar fecha: </label>
+                    <select id="selector-fecha" onchange="cambiarFecha()">
+        """
+        
+        # Añadir opciones para cada fecha
+        for fecha in all_dates:
+            selected = 'selected="selected"' if fecha == date_str else ''
+            html_content += f'<option value="{fecha}" {selected}>{fecha}</option>\n'
+        
+        html_content += """
+                    </select>
+                </div>
+                """ + (f'<a href="../{next_date}/informe_diario.html">Día Siguiente →</a>' if next_date else '<a class="disabled">Día Siguiente →</a>') + """
+            </div>
             
             <div class="stats">
                 <h2>Estadísticas del Día</h2>
@@ -1145,18 +1182,27 @@ class ConstructionMonitor:
                     elif 'riesgo' in tipo or 'peligro' in tipo:
                         subfolder = 'situaciones_riesgo'
                     
-                    img_path = f"{date_str}/{subfolder}/{img_name}"
+                    img_path = f"{subfolder}/{img_name}"
                 
                 html_content += f"""
                 <div class="{clase_css}">
                     <h3>Evento #{evento.get('id', 'N/A')} - {evento.get('hora', 'Sin hora')}</h3>
                     <p><strong>Tipo:</strong> {tipo}</p>
                     <p><strong>Descripción:</strong> {evento.get('descripcion', 'Sin descripción')}</p>
-                    {f'<img src="../{img_path}" alt="Imagen del evento" />' if img_path else ''}
+                    {f'<img src="{img_path}" alt="Imagen del evento" />' if img_path else ''}
                 </div>
                 """
         else:
             html_content += "<p>No hay eventos registrados para esta fecha.</p>"
+        
+        # Añadir navegación inferior
+        html_content += f"""
+        <div class="date-nav">
+            {f'<a href="../{prev_date}/informe_diario.html">← Día Anterior</a>' if prev_date else '<a class="disabled">← Día Anterior</a>'}
+            <a href="../index.html">Volver a Índice</a>
+            {f'<a href="../{next_date}/informe_diario.html">Día Siguiente →</a>' if next_date else '<a class="disabled">Día Siguiente →</a>'}
+        </div>
+        """
         
         # Cerrar HTML
         html_content += """
@@ -1168,9 +1214,79 @@ class ConstructionMonitor:
         with open(report_path, 'w', encoding='utf-8') as f:
             f.write(html_content)
         
+        # Generar o actualizar índice general
+        self._generate_index_page()
+        
         logger.info(f"Informe diario generado: {report_path}")
         return report_path
+    
+    def _generate_index_page(self):
+        """Genera una página índice con enlaces a todos los informes diarios."""
+        events_folder = self.config['alerts']['events_folder']
+        index_path = os.path.join(events_folder, "index.html")
         
+        # Obtener todas las fechas disponibles
+        dates = self.list_event_dates()
+        
+        # Generar HTML
+        html_content = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <title>Índice de Informes de Eventos</title>
+            <style>
+                body { font-family: Arial, sans-serif; margin: 20px; }
+                h1, h2 { color: #333; }
+                .container { max-width: 800px; margin: 0 auto; }
+                .date-list { margin: 20px 0; }
+                .date-list a { 
+                    display: block; 
+                    padding: 10px; 
+                    margin: 5px 0; 
+                    background-color: #f2f2f2; 
+                    text-decoration: none;
+                    color: #333;
+                    border-radius: 5px;
+                    transition: background-color 0.3s;
+                }
+                .date-list a:hover { background-color: #e0e0e0; }
+                .stats { margin-top: 30px; }
+                table { width: 100%; border-collapse: collapse; }
+                th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+                th { background-color: #f2f2f2; }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>Índice de Informes de Eventos</h1>
+                
+                <div class="date-list">
+                    <h2>Informes por Fecha</h2>
+        """
+        
+        # Ordenar fechas en orden descendente (más reciente primero)
+        for date in reversed(dates):
+            html_content += f'<a href="{date}/informe_diario.html">{date}</a>\n'
+        
+        # Si no hay fechas
+        if not dates:
+            html_content += "<p>No hay informes disponibles.</p>"
+        
+        # Cerrar HTML
+        html_content += """
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        
+        # Guardar índice
+        with open(index_path, 'w', encoding='utf-8') as f:
+            f.write(html_content)
+        
+        logger.info(f"Índice de informes generado: {index_path}")
+    
     def list_event_dates(self):
         """Lista las fechas que tienen eventos registrados."""
         events_folder = self.config['alerts']['events_folder']
