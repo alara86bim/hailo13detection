@@ -229,29 +229,54 @@ class ConstructionMonitor:
         """Inicializa el acelerador Hailo AI y carga los modelos."""
         logger.info("Inicializando Hailo AI Accelerator")
         
+        # Variable para indicar si estamos en modo simulación
+        self.simulation_mode = False
+        
         try:
             # Importar la biblioteca Hailo
             import hailo
             
-            # Inicializar dispositivo Hailo
-            self.hailo_device = hailo.Device(self.config['hailo']['device_id'])
-            
-            # Configurar modo de energía
-            power_mode = getattr(hailo.PowerMode, self.config['hailo']['power_mode'].upper())
-            self.hailo_device.control.set_power_mode(power_mode)
-            
-            # Cargar modelos de detección
-            self.vehicle_model = self._load_hailo_model(self.config['models']['vehicle_detection'])
-            self.person_model = self._load_hailo_model(self.config['models']['person_detection'])
-            
-            logger.info(f"Modelos cargados correctamente en Hailo: {self.hailo_device.control.get_info().description}")
+            try:
+                # Intentar inicializar dispositivo Hailo
+                self.hailo_device = hailo.Device(self.config['hailo']['device_id'])
+                
+                # Configurar modo de energía
+                power_mode = getattr(hailo.PowerMode, self.config['hailo']['power_mode'].upper())
+                self.hailo_device.control.set_power_mode(power_mode)
+                
+                logger.info(f"Hailo inicializado: {self.hailo_device.control.get_info().description}")
+            except Exception as e:
+                logger.warning(f"No se pudo inicializar el dispositivo Hailo: {e}")
+                logger.warning("Cambiando a modo de simulación")
+                self.simulation_mode = True
             
         except ImportError:
-            logger.error("No se pudo importar el módulo Hailo. Instalarlo con: pip install hailo-ai")
-            raise
+            logger.warning("No se pudo importar el módulo Hailo. Cambiando a modo de simulación")
+            self.simulation_mode = True
+        except AttributeError:
+            logger.warning("API de Hailo no disponible. Cambiando a modo de simulación")
+            self.simulation_mode = True
         except Exception as e:
-            logger.error(f"Error inicializando Hailo: {e}")
-            raise
+            logger.warning(f"Error inicializando Hailo: {e}. Cambiando a modo de simulación")
+            self.simulation_mode = True
+        
+        # Cargar modelos de detección (reales o simulados)
+        self.vehicle_model = self._load_hailo_model(self.config['models']['vehicle_detection'])
+        self.person_model = self._load_hailo_model(self.config['models']['person_detection'])
+        
+        # Cargar modelo de pose si está habilitado
+        if self.config['models'].get('pose_detection', {}).get('enable', False):
+            try:
+                self.pose_model = self._load_hailo_model(self.config['models']['pose_detection'])
+                logger.info("Modelo de poses cargado correctamente")
+            except Exception as e:
+                logger.error(f"Error cargando modelo de poses: {e}")
+                # Continuar sin modelo de poses
+        
+        if self.simulation_mode:
+            logger.info("Sistema funcionando en MODO SIMULACIÓN - Detecciones simuladas")
+        else:
+            logger.info("Sistema funcionando con acelerador Hailo - Detecciones reales")
     
     def _load_hailo_model(self, model_config):
         """Carga un modelo en el dispositivo Hailo."""
@@ -430,9 +455,13 @@ class ConstructionMonitor:
             return []
         
         try:
-            # Usar el modelo de detección de poses
-            pose_model = self._load_hailo_model(self.config['models']['pose_detection'])
-            return self._detect_objects(frame, pose_model)
+            # Usar el modelo de poses ya cargado si existe
+            if hasattr(self, 'pose_model'):
+                return self._detect_objects(frame, self.pose_model)
+            else:
+                # Intentar cargar modelo de poses
+                pose_model = self._load_hailo_model(self.config['models']['pose_detection'])
+                return self._detect_objects(frame, pose_model)
         except Exception as e:
             logger.error(f"Error en detección de poses: {e}")
             return []
