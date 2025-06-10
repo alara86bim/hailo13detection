@@ -36,7 +36,7 @@ VEHICLE_CLASSES = {
 }
 
 class ConstructionMonitor:
-    def __init__(self, config_path="config.yaml"):
+    def __init__(self, config_path="config.yaml", simulation_config=None):
         """Inicializa el monitor de construcción con la configuración especificada."""
         logger.info("Inicializando sistema de monitoreo de construcción")
         
@@ -73,6 +73,9 @@ class ConstructionMonitor:
         # Registro de eventos
         self.events_log_path = os.path.join(self.config['alerts']['events_folder'], "events_log.json")
         self.events_log = self._load_events_log()
+        
+        # Configuración de modo simulación
+        self.force_simulation = simulation_config.force_simulation if simulation_config else False
         
         logger.info("Sistema inicializado correctamente")
     
@@ -228,60 +231,127 @@ class ConstructionMonitor:
         # Variable para indicar si estamos en modo simulación
         self.simulation_mode = False
         
+        # Verificar si debemos forzar el modo simulación (por línea de comandos)
+        if hasattr(self, 'force_simulation') and self.force_simulation:
+            logger.info("Modo simulación forzado por línea de comandos")
+            self.simulation_mode = True
+            self._load_simulation_models()
+            return
+        
+        # Verificar si debemos forzar el modo real (por línea de comandos)
+        if hasattr(self, 'force_simulation') and self.force_simulation is False:
+            logger.info("Modo real forzado por línea de comandos - Se intentará usar hardware Hailo incluso si hay problemas")
+            # Continuamos con la inicialización normal, pero no activaremos el modo simulación automáticamente
+        else:
+            # Verificar si debemos forzar el modo simulación desde la configuración
+            if self.config.get('hailo', {}).get('force_simulation_mode', False):
+                logger.info("Modo simulación forzado por configuración")
+                self.simulation_mode = True
+                self._load_simulation_models()
+                return
+        
         try:
+            # Obtener información del kernel
+            kernel_version = os.uname().release
+            logger.info(f"Versión del kernel detectada: {kernel_version}")
+            
+            # Verificar compatibilidad con el kernel
+            if kernel_version.startswith("6.12"):
+                logger.warning(f"Kernel 6.12 detectado. Esto puede causar problemas con los controladores Hailo.")
+                if not hasattr(self, 'force_simulation') or self.force_simulation is None:
+                    logger.warning("Si experimenta problemas, considere usar --simulation o agregar 'force_simulation_mode: true' en config.yaml")
+            
             # Importar la biblioteca Hailo
             import hailo
             
             try:
                 # Intentar inicializar dispositivo Hailo
+                logger.info("Intentando conectar con dispositivo Hailo...")
                 self.hailo_device = hailo.Device(self.config['hailo']['device_id'])
                 
                 # Configurar modo de energía
                 power_mode = getattr(hailo.PowerMode, self.config['hailo']['power_mode'].upper())
                 self.hailo_device.control.set_power_mode(power_mode)
                 
-                logger.info(f"Hailo inicializado: {self.hailo_device.control.get_info().description}")
+                device_info = self.hailo_device.control.get_info()
+                logger.info(f"Hailo inicializado: {device_info.description}")
+                logger.info(f"    ID: {device_info.id}")
+                logger.info(f"    Serial: {device_info.serial_number}")
+                logger.info(f"    Versión FW: {device_info.firmware_version}")
             except Exception as e:
-                logger.warning(f"No se pudo inicializar el dispositivo Hailo: {e}")
+                logger.error(f"No se pudo inicializar el dispositivo Hailo: {e}")
+                
+                # Verificar si es un problema de permisos
+                if "Permission denied" in str(e):
+                    logger.error("ERROR DE PERMISOS: Ejecute 'sudo chmod 777 /dev/hailo*' o ejecute el programa como root")
+                # Verificar si es un problema de módulo del kernel
+                elif "No such file or directory" in str(e) or "Cannot open device" in str(e):
+                    logger.error("ERROR DE CONTROLADOR: Los módulos del kernel no están cargados correctamente")
+                    logger.error("Ejecute 'lsmod | grep hailo' para verificar si los módulos están cargados")
+                    logger.error("Puede reinstalar los controladores con 'sudo apt-get install --reinstall hailo-driver'")
+                
                 logger.warning("Cambiando a modo de simulación")
                 self.simulation_mode = True
             
         except ImportError:
-            logger.warning("No se pudo importar el módulo Hailo. Cambiando a modo de simulación")
+            logger.error("No se pudo importar el módulo Hailo. Verifique que el SDK de Hailo esté instalado correctamente.")
+            logger.error("Puede instalarlo siguiendo las instrucciones en: https://hailo.ai/developer-zone/")
+            logger.warning("Cambiando a modo de simulación")
             self.simulation_mode = True
-        except AttributeError:
-            logger.warning("API de Hailo no disponible. Cambiando a modo de simulación")
+        except AttributeError as e:
+            logger.error(f"API de Hailo no disponible: {e}")
+            logger.warning("Cambiando a modo de simulación")
             self.simulation_mode = True
         except Exception as e:
-            logger.warning(f"Error inicializando Hailo: {e}. Cambiando a modo de simulación")
+            logger.error(f"Error inesperado inicializando Hailo: {e}")
+            logger.warning("Cambiando a modo de simulación")
             self.simulation_mode = True
         
         # Cargar modelos de detección (reales o simulados)
-        self.vehicle_model = self._load_hailo_model(self.config['models']['vehicle_detection'])
-        self.person_model = self._load_hailo_model(self.config['models']['person_detection'])
-        
-        # Cargar modelo de pose si está habilitado
-        if self.config['models'].get('pose_detection', {}).get('enable', False):
-            try:
-                self.pose_model = self._load_hailo_model(self.config['models']['pose_detection'])
-                logger.info("Modelo de poses cargado correctamente")
-            except Exception as e:
-                logger.error(f"Error cargando modelo de poses: {e}")
-                # Continuar sin modelo de poses
+        if self.simulation_mode:
+            self._load_simulation_models()
+        else:
+            self._load_hailo_models()
         
         if self.simulation_mode:
             logger.info("Sistema funcionando en MODO SIMULACIÓN - Detecciones simuladas")
         else:
             logger.info("Sistema funcionando con acelerador Hailo - Detecciones reales")
     
-    def _load_hailo_model(self, model_config):
-        """Carga un modelo en el dispositivo Hailo."""
-        # Implementación simplificada - en la práctica necesitarías usar la API de Hailo
-        # para cargar el modelo .hef y prepararlo para inferencia
-        logger.info(f"Cargando modelo: {model_config['model_path']}")
+    def _load_simulation_models(self):
+        """Carga modelos simulados cuando Hailo no está disponible."""
+        logger.info("Cargando modelos simulados")
+        self.vehicle_model = self._create_dummy_model(self.config['models']['vehicle_detection'])
+        self.person_model = self._create_dummy_model(self.config['models']['person_detection'])
         
-        # Aquí iría el código real de carga del modelo Hailo
-        # Por ahora, devolvemos un objeto dummy para simular
+        # Cargar modelo de pose si está habilitado
+        if self.config['models'].get('pose_detection', {}).get('enable', False):
+            self.pose_model = self._create_dummy_model(self.config['models']['pose_detection'])
+            logger.info("Modelo de poses (simulado) cargado correctamente")
+    
+    def _load_hailo_models(self):
+        """Carga modelos reales en el dispositivo Hailo."""
+        try:
+            logger.info("Cargando modelos Hailo...")
+            self.vehicle_model = self._load_hailo_model(self.config['models']['vehicle_detection'])
+            self.person_model = self._load_hailo_model(self.config['models']['person_detection'])
+            
+            # Cargar modelo de pose si está habilitado
+            if self.config['models'].get('pose_detection', {}).get('enable', False):
+                try:
+                    self.pose_model = self._load_hailo_model(self.config['models']['pose_detection'])
+                    logger.info("Modelo de poses cargado correctamente")
+                except Exception as e:
+                    logger.error(f"Error cargando modelo de poses: {e}")
+                    # Continuar sin modelo de poses
+        except Exception as e:
+            logger.error(f"Error cargando modelos Hailo: {e}")
+            logger.warning("Cambiando a modo simulación")
+            self.simulation_mode = True
+            self._load_simulation_models()
+    
+    def _create_dummy_model(self, config):
+        """Crea un modelo dummy para simulación."""
         class DummyModel:
             def __init__(self, config):
                 self.config = config
@@ -292,7 +362,15 @@ class ConstructionMonitor:
                 # aquí se usaría el dispositivo Hailo para inferencia
                 return []
         
-        return DummyModel(model_config)
+        return DummyModel(config)
+    
+    def _load_hailo_model(self, model_config):
+        """Carga un modelo en el dispositivo Hailo."""
+        logger.info(f"Cargando modelo: {model_config['model_path']}")
+        
+        # Aquí iría el código real de carga del modelo Hailo
+        # Por ahora, devolvemos un objeto dummy para simular
+        return self._create_dummy_model(model_config)
     
     def init_zones(self):
         """Inicializa las zonas de monitoreo."""
@@ -1308,8 +1386,29 @@ class ConstructionMonitor:
 
 if __name__ == "__main__":
     # Comprobar argumentos de línea de comandos
+    import sys
+    
+    # Banderas para control de modo simulación
+    force_simulation = None  # None = usar configuración, True = forzar simulación, False = forzar real
+    
+    # Procesar argumentos
+    i = 1
+    while i < len(sys.argv):
+        arg = sys.argv[i]
+        
+        # Opciones de modo simulación
+        if arg == "--simulation":
+            force_simulation = True
+            # Eliminar este argumento para no interferir con otros procesamientos
+            sys.argv.pop(i)
+        elif arg == "--no-simulation":
+            force_simulation = False
+            sys.argv.pop(i)
+        else:
+            i += 1
+    
     if len(sys.argv) > 1:
-        # Procesar argumentos
+        # Procesar otros argumentos
         if sys.argv[1] == "--report":
             # Inicializar el monitor sin iniciar la cámara
             monitor = ConstructionMonitor()
@@ -1340,6 +1439,8 @@ if __name__ == "__main__":
         elif sys.argv[1] == "--help":
             print("Uso:")
             print("  python main.py                    - Iniciar el sistema de monitoreo")
+            print("  python main.py --simulation       - Iniciar en modo simulación (sin usar hardware Hailo)")
+            print("  python main.py --no-simulation    - Iniciar en modo real (forzar uso de hardware Hailo)")
             print("  python main.py --report           - Generar informe del día actual")
             print("  python main.py --report YYYY-MM-DD - Generar informe para una fecha específica")
             print("  python main.py --report list      - Listar fechas con eventos registrados")
@@ -1347,5 +1448,10 @@ if __name__ == "__main__":
             sys.exit(0)
     
     # Iniciar el sistema de monitoreo normal
-    monitor = ConstructionMonitor()
+    class SimulationConfig:
+        def __init__(self, mode):
+            self.force_simulation = mode
+    
+    # Inicializar monitor con la configuración de simulación
+    monitor = ConstructionMonitor(simulation_config=SimulationConfig(force_simulation) if force_simulation is not None else None)
     monitor.run()

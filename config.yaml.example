@@ -1,0 +1,62 @@
+# Configuración del sistema de monitoreo de construcción
+
+# Configuración de la cámara
+camera:
+  use_arducam: true    # Usar ArduCam con libcamera-vid
+  width: 1920          # Ancho de captura
+  height: 1080         # Alto de captura
+  fps: 30              # Frames por segundo
+
+# Configuración del acelerador Hailo
+hailo:
+  device_id: 0         # ID del dispositivo Hailo (0 para el primer dispositivo)
+  power_mode: PERFORMANCE   # Modos: PERFORMANCE, BALANCED, POWER_EFFICIENT
+  force_simulation_mode: true  # Forzar modo simulación cuando hay problemas con el hardware
+
+# Configuración de modelos
+models:
+  vehicle_detection:
+    model_path: "models/yolov5s_vehicle.hef"
+    confidence_threshold: 0.5
+  person_detection:
+    model_path: "models/yolov5s_person.hef"
+    confidence_threshold: 0.5
+  pose_detection:
+    enable: true
+    model_path: "models/posenet_resnet_v1_50.hef"
+    confidence_threshold: 0.4
+
+# Configuración de zonas
+zones:
+  # Zonas de entrada/salida de vehículos (puntos normalizados entre 0 y 1)
+  entry_exit:
+    - name: "Entrada Principal"
+      points: [[0.1, 0.4], [0.3, 0.4], [0.3, 0.6], [0.1, 0.6]]
+    - name: "Salida Principal"
+      points: [[0.7, 0.4], [0.9, 0.4], [0.9, 0.6], [0.7, 0.6]]
+  
+  # Zonas de peligro
+  danger_zones:
+    - name: "Zona de Descarga"
+      points: [[0.4, 0.2], [0.6, 0.2], [0.6, 0.4], [0.4, 0.4]]
+    - name: "Área de Maquinaria"
+      points: [[0.4, 0.6], [0.6, 0.6], [0.6, 0.8], [0.4, 0.8]]
+
+# Configuración de alertas
+alerts:
+  save_event_images: true
+  events_folder: "events"
+  # Configuración de detección de posturas peligrosas
+  dangerous_poses:
+    - name: "brazos_elevados"
+      description: "Persona con brazos elevados"
+      # Criterios de keypoints para detección
+      # [índice_keypoint1, índice_keypoint2, valor_ratio]
+      keypoints_criteria:
+        - [5, 9, -0.5]  # Hombro izquierdo a muñeca izquierda
+        - [6, 10, -0.5] # Hombro derecho a muñeca derecha
+    - name: "agachado"
+      description: "Persona agachada en postura incorrecta"
+      keypoints_criteria:
+        - [5, 13, 0.8]  # Hombro a rodilla
+        - [6, 14, 0.8] 
