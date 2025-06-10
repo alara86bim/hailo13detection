@@ -1,0 +1,65 @@
+# Configuración para el sistema de detección
+
+# Configuración de la cámara
+camera:
+  width: 1920
+  height: 1080
+  fps: 30
+  use_arducam: true
+  arducam_config: "camera_config/arducam_64mp.json"
+
+# Configuración de modelos de detección
+models:
+  vehicle_detection:
+    type: "yolov5"
+    model_path: "models/yolov5s_vehicle.hef"
+    confidence_threshold: 0.5
+    classes: [1, 2, 3, 5, 7]  # Índices de clases para vehículos en COCO
+    
+  person_detection:
+    type: "yolov5"
+    model_path: "models/yolov5s_person.hef"
+    confidence_threshold: 0.5
+    classes: [0]  # Índice de clase para personas en COCO
+  
+  pose_detection:
+    type: "posenet"
+    model_path: "models/posenet_resnet_v1_50.hef"
+    confidence_threshold: 0.4
+    enable: true
+    keypoints: 17  # Número de puntos clave para COCO
+
+# Zonas de interés (coordenadas normalizadas 0-1)
+zones:
+  entry_exit:
+    - name: "Entrada principal"
+      points: [[0.1, 0.6], [0.3, 0.6], [0.3, 0.9], [0.1, 0.9]]
+    - name: "Salida secundaria"
+      points: [[0.7, 0.6], [0.9, 0.6], [0.9, 0.9], [0.7, 0.9]]
+  
+  danger_zones:
+    - name: "Zona de descarga 1"
+      points: [[0.4, 0.4], [0.6, 0.4], [0.6, 0.6], [0.4, 0.6]]
+
+# Configuración de alertas
+alerts:
+  enable_sound: true
+  enable_visual: true
+  log_events: true
+  save_event_images: true
+  events_folder: "events"
+  
+  # Configuración de posturas peligrosas
+  dangerous_poses:
+    - name: "Persona agachada cerca de vehículo"
+      description: "Persona en posición vulnerable cerca de vehículo"
+      keypoints_criteria: [[5, 6, 0.6], [11, 12, 0.3]]  # Hombros más altos que caderas
+    - name: "Persona con brazos elevados"
+      description: "Persona realizando actividad con brazos elevados"
+      keypoints_criteria: [[9, 5, 1.2], [10, 6, 1.2]]   # Muñecas más altas que hombros
+
+# Hailo configuration
+hailo:
+  device_id: 0  # ID del dispositivo Hailo (0 para el primero)
+  power_mode: "low_power"  # Opciones: "low_power", "performance"
+  target_device: "hailo13"  # Opciones: "hailo8l", "hailo8", "hailo13" 
