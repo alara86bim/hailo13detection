@@ -13,6 +13,7 @@ import queue
 from datetime import datetime
 from pathlib import Path
 import json
+import sys
 
 # Configurar logging
 logging.basicConfig(
@@ -633,7 +634,8 @@ class ConstructionMonitor:
                             "type": f"vehiculo_{direction}",
                             "description": event_msg,
                             "vehicle_type": vehicle_desc,
-                            "confidence": float(confidence)
+                            "confidence": float(confidence),
+                            "zone_name": zone['name']
                         }
                         
                         self.events_log["events"].append(event_data)
@@ -701,7 +703,9 @@ class ConstructionMonitor:
                                     "description": event_msg,
                                     "vehicle_type": vehicle_desc,
                                     "distance": float(distance),
-                                    "zone": zone['name']
+                                    "zone": zone['name'],
+                                    "person_id": person_id,
+                                    "vehicle_id": j
                                 }
                                 
                                 self.events_log["events"].append(event_data)
@@ -788,22 +792,126 @@ class ConstructionMonitor:
     
     def _save_event_image(self, frame, event_msg, subfolder, event_data):
         """Guarda una imagen de un evento detectado con metadatos."""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"{self.config['alerts']['events_folder']}/{subfolder}/event_{timestamp}_{self.event_counter}.jpg"
+        # Obtener fecha y hora actual
+        now = datetime.now()
+        date_str = now.strftime("%Y-%m-%d")
+        time_str = now.strftime("%H-%M-%S")
+        timestamp = now.strftime("%Y%m%d_%H%M%S")
+        
+        # Crear estructura de carpetas organizada por fecha
+        date_folder = os.path.join(self.config['alerts']['events_folder'], date_str)
+        type_folder = os.path.join(date_folder, subfolder)
+        
+        # Crear carpetas si no existen
+        os.makedirs(type_folder, exist_ok=True)
+        
+        # Determinar nombre de archivo base
+        if "vehicle_type" in event_data:
+            # Para vehículos, incluir tipo en nombre de archivo
+            vehicle_type = event_data["vehicle_type"].replace(" ", "_")
+            base_filename = f"{time_str}_{vehicle_type}_{self.event_counter}"
+        else:
+            # Para otros eventos
+            base_filename = f"{time_str}_evento_{self.event_counter}"
+        
+        # Ruta completa para imagen y metadatos
+        image_filename = os.path.join(type_folder, f"{base_filename}.jpg")
+        metadata_filename = os.path.join(type_folder, f"{base_filename}.json")
         
         # Añadir texto con el evento
         img_with_text = frame.copy()
-        cv2.putText(img_with_text, event_msg, (10, 30), 
+        
+        # Añadir recuadro semitransparente para el texto
+        overlay = img_with_text.copy()
+        cv2.rectangle(overlay, (5, 5), (600, 40), (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.6, img_with_text, 0.4, 0, img_with_text)
+        
+        # Añadir fecha/hora y mensaje
+        time_info = now.strftime("%Y-%m-%d %H:%M:%S")
+        cv2.putText(img_with_text, time_info, (10, 20), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+        cv2.putText(img_with_text, event_msg, (10, 45), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
         
         # Guardar imagen
-        cv2.imwrite(filename, img_with_text)
-        logger.info(f"Imagen del evento guardada: {filename}")
+        cv2.imwrite(image_filename, img_with_text)
+        logger.info(f"Imagen del evento guardada: {image_filename}")
+        
+        # Mejorar metadatos con información adicional
+        enhanced_data = event_data.copy()
+        enhanced_data.update({
+            "timestamp_iso": now.isoformat(),
+            "date": date_str,
+            "time": time_str,
+            "image_path": image_filename,
+            "event_folder": type_folder
+        })
         
         # Guardar metadatos junto con la imagen
-        metadata_file = filename.replace('.jpg', '.json')
-        with open(metadata_file, 'w') as f:
-            json.dump(event_data, f, indent=4)
+        with open(metadata_filename, 'w') as f:
+            json.dump(enhanced_data, f, indent=4)
+        
+        # Actualizar el registro diario
+        self._update_daily_register(date_str, enhanced_data)
+        
+        return image_filename
+    
+    def _update_daily_register(self, date_str, event_data):
+        """Actualiza el registro diario de eventos."""
+        # Ruta al registro diario
+        register_path = os.path.join(
+            self.config['alerts']['events_folder'], 
+            date_str, 
+            "registro_diario.json"
+        )
+        
+        # Cargar registro existente o crear uno nuevo
+        if os.path.exists(register_path):
+            try:
+                with open(register_path, 'r') as f:
+                    daily_register = json.load(f)
+            except:
+                daily_register = {"fecha": date_str, "eventos": []}
+        else:
+            daily_register = {"fecha": date_str, "eventos": []}
+        
+        # Añadir evento al registro
+        if "eventos" not in daily_register:
+            daily_register["eventos"] = []
+        
+        # Crear resumen del evento
+        event_summary = {
+            "id": event_data["id"],
+            "hora": event_data.get("time", ""),
+            "tipo": event_data.get("type", ""),
+            "descripcion": event_data.get("description", ""),
+            "imagen": os.path.basename(event_data.get("image_path", ""))
+        }
+        
+        # Añadir resumen al registro
+        daily_register["eventos"].append(event_summary)
+        
+        # Actualizar estadísticas
+        if "estadisticas" not in daily_register:
+            daily_register["estadisticas"] = {
+                "vehiculos_entrada": 0,
+                "vehiculos_salida": 0,
+                "situaciones_riesgo": 0
+            }
+        
+        # Incrementar contador según tipo de evento
+        event_type = event_data.get("type", "")
+        if event_type == "vehiculo_entrada":
+            daily_register["estadisticas"]["vehiculos_entrada"] += 1
+        elif event_type == "vehiculo_salida":
+            daily_register["estadisticas"]["vehiculos_salida"] += 1
+        elif event_type in ["situacion_riesgo", "postura_peligrosa"]:
+            daily_register["estadisticas"]["situaciones_riesgo"] += 1
+        
+        # Guardar registro actualizado
+        os.makedirs(os.path.dirname(register_path), exist_ok=True)
+        with open(register_path, 'w') as f:
+            json.dump(daily_register, f, indent=4)
     
     def _handle_pose_alerts(self, frame, pose_alerts):
         """Maneja las alertas de posturas peligrosas."""
@@ -829,7 +937,9 @@ class ConstructionMonitor:
                 "type": "postura_peligrosa",
                 "description": event_msg,
                 "pose_name": alert['pose_name'],
-                "distance": float(alert['distance'])
+                "distance": float(alert['distance']),
+                "person_bbox": alert['person_bbox'],
+                "vehicle_bbox": alert['vehicle_bbox']
             }
             
             self.events_log["events"].append(event_data)
@@ -906,24 +1016,220 @@ class ConstructionMonitor:
         except KeyboardInterrupt:
             logger.info("Monitoreo detenido por el usuario")
         finally:
-            # Detener captura
-            self.stop_capture = True
-            if hasattr(self, 'capture_thread') and self.capture_thread.is_alive():
-                self.capture_thread.join(timeout=3.0)
+            # Cerrar limpiamente
+            self._cleanup()
+    
+    def _cleanup(self):
+        """Limpia los recursos y genera informe final del día."""
+        logger.info("Limpiando recursos...")
+        
+        # Detener captura
+        self.stop_capture = True
+        if hasattr(self, 'capture_thread') and self.capture_thread.is_alive():
+            self.capture_thread.join(timeout=3.0)
+        
+        # Terminar proceso de libcamera si existe
+        if self.camera_process:
+            self.camera_process.terminate()
+            self.camera_process = None
+        
+        # Liberar recursos de OpenCV si los hay
+        if hasattr(self, 'camera'):
+            self.camera.release()
+        
+        # Cerrar ventanas
+        cv2.destroyAllWindows()
+        
+        # Generar informe del día actual
+        current_date = datetime.now().strftime("%Y-%m-%d")
+        report_path = self.generate_daily_report(current_date)
+        if report_path:
+            logger.info(f"Informe final generado: {report_path}")
+        
+        logger.info("Sistema finalizado correctamente")
+    
+    def generate_daily_report(self, date_str=None):
+        """Genera un informe HTML con los eventos del día especificado."""
+        if date_str is None:
+            # Usar fecha actual si no se especifica
+            date_str = datetime.now().strftime("%Y-%m-%d")
+        
+        # Ruta al registro diario
+        register_path = os.path.join(
+            self.config['alerts']['events_folder'],
+            date_str,
+            "registro_diario.json"
+        )
+        
+        # Verificar si existe el registro para esa fecha
+        if not os.path.exists(register_path):
+            logger.warning(f"No existe registro para la fecha {date_str}")
+            return None
+        
+        # Cargar registro diario
+        with open(register_path, 'r') as f:
+            daily_register = json.load(f)
+        
+        # Ruta para el informe HTML
+        report_path = os.path.join(
+            self.config['alerts']['events_folder'],
+            date_str,
+            "informe_diario.html"
+        )
+        
+        # Generar HTML
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <title>Informe de Eventos - {date_str}</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 20px; }}
+                h1, h2 {{ color: #333; }}
+                table {{ border-collapse: collapse; width: 100%; margin-bottom: 20px; }}
+                th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+                th {{ background-color: #f2f2f2; }}
+                tr:nth-child(even) {{ background-color: #f9f9f9; }}
+                .event-entry {{ margin-bottom: 15px; padding: 10px; border: 1px solid #ddd; }}
+                .stats {{ background-color: #eef; padding: 10px; border-radius: 5px; }}
+                .vehicle-entry {{ background-color: #efe; }}
+                .vehicle-exit {{ background-color: #fee; }}
+                .danger {{ background-color: #fdd; }}
+                img {{ max-width: 300px; max-height: 200px; border: 1px solid #ddd; }}
+            </style>
+        </head>
+        <body>
+            <h1>Informe de Eventos - {date_str}</h1>
             
-            # Terminar proceso de libcamera si existe
-            if self.camera_process:
-                self.camera_process.terminate()
-                self.camera_process = None
+            <div class="stats">
+                <h2>Estadísticas del Día</h2>
+                <table>
+                    <tr>
+                        <th>Vehículos entrando</th>
+                        <th>Vehículos saliendo</th>
+                        <th>Situaciones de riesgo</th>
+                    </tr>
+                    <tr>
+                        <td>{daily_register.get('estadisticas', {}).get('vehiculos_entrada', 0)}</td>
+                        <td>{daily_register.get('estadisticas', {}).get('vehiculos_salida', 0)}</td>
+                        <td>{daily_register.get('estadisticas', {}).get('situaciones_riesgo', 0)}</td>
+                    </tr>
+                </table>
+            </div>
             
-            # Liberar recursos de OpenCV si los hay
-            if hasattr(self, 'camera'):
-                self.camera.release()
-            
-            cv2.destroyAllWindows()
-            logger.info("Sistema finalizado correctamente")
+            <h2>Eventos Registrados</h2>
+        """
+        
+        # Añadir eventos
+        eventos = daily_register.get('eventos', [])
+        if eventos:
+            for evento in eventos:
+                tipo = evento.get('tipo', '')
+                clase_css = 'event-entry'
+                if 'entrada' in tipo:
+                    clase_css += ' vehicle-entry'
+                elif 'salida' in tipo:
+                    clase_css += ' vehicle-exit'
+                elif 'riesgo' in tipo or 'peligro' in tipo:
+                    clase_css += ' danger'
+                
+                # Ruta de la imagen
+                img_name = evento.get('imagen', '')
+                img_path = ""
+                if img_name:
+                    # Determinar subfolder basado en tipo
+                    subfolder = 'vehiculos_entrada'
+                    if 'salida' in tipo:
+                        subfolder = 'vehiculos_salida'
+                    elif 'riesgo' in tipo or 'peligro' in tipo:
+                        subfolder = 'situaciones_riesgo'
+                    
+                    img_path = f"{date_str}/{subfolder}/{img_name}"
+                
+                html_content += f"""
+                <div class="{clase_css}">
+                    <h3>Evento #{evento.get('id', 'N/A')} - {evento.get('hora', 'Sin hora')}</h3>
+                    <p><strong>Tipo:</strong> {tipo}</p>
+                    <p><strong>Descripción:</strong> {evento.get('descripcion', 'Sin descripción')}</p>
+                    {f'<img src="../{img_path}" alt="Imagen del evento" />' if img_path else ''}
+                </div>
+                """
+        else:
+            html_content += "<p>No hay eventos registrados para esta fecha.</p>"
+        
+        # Cerrar HTML
+        html_content += """
+        </body>
+        </html>
+        """
+        
+        # Guardar informe
+        with open(report_path, 'w', encoding='utf-8') as f:
+            f.write(html_content)
+        
+        logger.info(f"Informe diario generado: {report_path}")
+        return report_path
+        
+    def list_event_dates(self):
+        """Lista las fechas que tienen eventos registrados."""
+        events_folder = self.config['alerts']['events_folder']
+        dates = []
+        
+        # Verificar carpetas de fecha
+        if os.path.exists(events_folder):
+            for item in os.listdir(events_folder):
+                item_path = os.path.join(events_folder, item)
+                if os.path.isdir(item_path) and item[0].isdigit():
+                    # Verificar si tiene formato de fecha
+                    try:
+                        datetime.strptime(item, "%Y-%m-%d")
+                        dates.append(item)
+                    except ValueError:
+                        continue
+        
+        return sorted(dates)
 
 if __name__ == "__main__":
-    # Iniciar el sistema
+    # Comprobar argumentos de línea de comandos
+    if len(sys.argv) > 1:
+        # Procesar argumentos
+        if sys.argv[1] == "--report":
+            # Inicializar el monitor sin iniciar la cámara
+            monitor = ConstructionMonitor()
+            
+            # Determinar fecha para el informe
+            date_str = None
+            if len(sys.argv) > 2:
+                date_str = sys.argv[2]
+            
+            # Si se pidió listar fechas disponibles
+            if date_str == "list":
+                dates = monitor.list_event_dates()
+                if dates:
+                    print("Fechas con eventos registrados:")
+                    for date in dates:
+                        print(f"  - {date}")
+                else:
+                    print("No hay fechas con eventos registrados.")
+            else:
+                # Generar informe para la fecha especificada o actual
+                report_path = monitor.generate_daily_report(date_str)
+                if report_path:
+                    print(f"Informe generado: {report_path}")
+                else:
+                    print(f"No se pudo generar el informe para la fecha {'especificada' if date_str else 'actual'}")
+            
+            sys.exit(0)
+        elif sys.argv[1] == "--help":
+            print("Uso:")
+            print("  python main.py                    - Iniciar el sistema de monitoreo")
+            print("  python main.py --report           - Generar informe del día actual")
+            print("  python main.py --report YYYY-MM-DD - Generar informe para una fecha específica")
+            print("  python main.py --report list      - Listar fechas con eventos registrados")
+            print("  python main.py --help             - Mostrar esta ayuda")
+            sys.exit(0)
+    
+    # Iniciar el sistema de monitoreo normal
     monitor = ConstructionMonitor()
     monitor.run()
