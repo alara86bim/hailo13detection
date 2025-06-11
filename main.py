@@ -257,50 +257,79 @@ class ConstructionMonitor:
             
             # Verificar compatibilidad con el kernel
             if kernel_version.startswith("6.12"):
-                logger.warning(f"Kernel 6.12 detectado. Esto puede causar problemas con los controladores Hailo.")
-                if not hasattr(self, 'force_simulation') or self.force_simulation is None:
-                    logger.warning("Si experimenta problemas, considere usar --simulation o agregar 'force_simulation_mode: true' en config.yaml")
+                logger.info(f"Kernel 6.12 detectado ({kernel_version}). Adaptando para este kernel.")
+                # Para el kernel 6.12.25-rpt-rp1-2712, no mostrar warning ya que estamos adaptando el código
             
-            # Importar la biblioteca Hailo - Para HailoRT 4.13
+            # Importar la biblioteca Hailo para firmware 4.20
             try:
-                # Primero intentamos importar en formato antiguo (4.13 y anteriores)
+                # Importar hailo (debería funcionar para 4.20)
                 import hailo
-                logger.info("Usando formato de importación para HailoRT 4.13")
+                logger.info("Módulo 'hailo' importado correctamente para HailoRT 4.20")
                 self.hailo_module = hailo
+                
+                # Obtener versión del firmware si está disponible
+                hailo_version = getattr(hailo, "get_version", lambda: "Desconocida")()
+                logger.info(f"HailoRT versión: {hailo_version}")
             except ImportError:
-                # Si falla, intentamos con el nuevo formato (4.14+)
-                import hailort as hailo
-                logger.info("Usando formato de importación para HailoRT 4.14+")
-                self.hailo_module = hailo
+                logger.error("No se pudo importar el módulo 'hailo'. Verificando alternativas...")
+                try:
+                    # Intentar con el nombre alternativo por si acaso
+                    import hailort as hailo
+                    logger.info("Módulo 'hailort' importado como alternativa")
+                    self.hailo_module = hailo
+                except ImportError:
+                    logger.error("No se pudo importar ningún módulo de Hailo. Cambiando a modo simulación.")
+                    self.simulation_mode = True
+                    self._load_simulation_models()
+                    return
             
             try:
                 # Intentar inicializar dispositivo Hailo
                 logger.info("Intentando conectar con dispositivo Hailo...")
                 
-                # En versión 4.13, la API puede ser diferente
+                # Configuración específica para firmware 4.20
                 try:
-                    # Formato antiguo (4.13)
+                    # Crear dispositivo - API para 4.20
+                    logger.info("Intentando crear dispositivo con API de HailoRT 4.20")
+                    self.hailo_device = self.hailo_module.Device()
+                    
+                    # En 4.20, obtenemos el modo de energía como constante
+                    if hasattr(self.hailo_module, "POWER_MODE"):
+                        # API antigua (4.13-4.20)
+                        power_mode_str = self.config['hailo']['power_mode'].upper()
+                        power_mode = getattr(self.hailo_module.POWER_MODE, power_mode_str)
+                        logger.info(f"Configurando modo de energía: {power_mode_str}")
+                        self.hailo_device.control.set_power_mode(power_mode)
+                    elif hasattr(self.hailo_module, "PowerMode"):
+                        # API nueva
+                        power_mode_str = self.config['hailo']['power_mode'].upper()
+                        power_mode = getattr(self.hailo_module.PowerMode, power_mode_str)
+                        logger.info(f"Configurando modo de energía: {power_mode_str}")
+                        self.hailo_device.control.set_power_mode(power_mode)
+                    else:
+                        logger.warning("No se pudo configurar el modo de energía - Enumeración no encontrada")
+                    
+                    # Obtener información del dispositivo
+                    device_info = self.hailo_device.control.get_info()
+                    logger.info(f"Hailo inicializado: {device_info.description}")
+                    logger.info(f"    ID: {device_info.id}")
+                    logger.info(f"    Serial: {device_info.serial_number}")
+                    logger.info(f"    Versión FW: {device_info.firmware_version}")
+                    
+                    # Verificar específicamente la versión 4.20
+                    if hasattr(device_info, "firmware_version"):
+                        fw_version = device_info.firmware_version
+                        if "4.20" in fw_version:
+                            logger.info("Firmware 4.20 detectado correctamente")
+                        else:
+                            logger.warning(f"Firmware detectado ({fw_version}) diferente al esperado (4.20)")
+                    
+                except Exception as e:
+                    logger.error(f"Error en la inicialización específica para 4.20: {e}")
+                    # En caso de error, probar con opciones genéricas
+                    logger.info("Probando inicialización genérica...")
                     self.hailo_device = self.hailo_module.Device(self.config['hailo']['device_id'])
                     
-                    # Configurar modo de energía
-                    power_mode = getattr(self.hailo_module.POWER_MODE, self.config['hailo']['power_mode'].upper())
-                    self.hailo_device.control.set_power_mode(power_mode)
-                    
-                    device_info = self.hailo_device.control.get_info()
-                except AttributeError:
-                    # Formato nuevo (4.14+)
-                    self.hailo_device = self.hailo_module.Device(self.config['hailo']['device_id'])
-                    
-                    # Configurar modo de energía
-                    power_mode = getattr(self.hailo_module.PowerMode, self.config['hailo']['power_mode'].upper())
-                    self.hailo_device.control.set_power_mode(power_mode)
-                    
-                    device_info = self.hailo_device.control.get_info()
-                
-                logger.info(f"Hailo inicializado: {device_info.description}")
-                logger.info(f"    ID: {device_info.id}")
-                logger.info(f"    Serial: {device_info.serial_number}")
-                logger.info(f"    Versión FW: {device_info.firmware_version}")
             except Exception as e:
                 logger.error(f"No se pudo inicializar el dispositivo Hailo: {e}")
                 
@@ -319,8 +348,6 @@ class ConstructionMonitor:
         except ImportError as e:
             logger.error(f"No se pudo importar el módulo Hailo: {e}")
             logger.error("Verifique que el SDK de Hailo esté instalado correctamente.")
-            logger.error("Para HailoRT 4.13, el módulo debe importarse como 'import hailo'")
-            logger.error("Para versiones más recientes, podría ser 'import hailort'")
             logger.warning("Cambiando a modo de simulación")
             self.simulation_mode = True
         except AttributeError as e:
@@ -407,13 +434,13 @@ class ConstructionMonitor:
             self._load_simulation_models()
     
     def _load_hailo_model_v4_13(self, hef_path, model_type):
-        """Carga un modelo en HailoRT 4.13 (API antigua)."""
-        logger.info(f"Cargando modelo {model_type} con API HailoRT 4.13: {hef_path}")
+        """Carga un modelo en HailoRT 4.13-4.20 (API antigua)."""
+        logger.info(f"Cargando modelo {model_type} con API HailoRT 4.20: {hef_path}")
         
         try:
-            # Intentar cargar con API v4.13
+            # Intentar cargar con API v4.20
             # Creamos una clase compatible con la interfaz que espera el resto del código
-            class HailoModelV4_13:
+            class HailoModelV4_20:
                 def __init__(self, path, hailo_device, hailo_module, model_type):
                     self.path = path
                     self.device = hailo_device
@@ -421,39 +448,60 @@ class ConstructionMonitor:
                     self.name = Path(path).stem
                     self.model_type = model_type
                     
-                    # Cargar HEF
-                    self.hef = self.hailo.Hef(self.path)
+                    logger.info(f"Cargando archivo HEF: {self.path}")
+                    if not os.path.exists(self.path):
+                        logger.error(f"¡ARCHIVO NO ENCONTRADO! {self.path}")
+                        raise FileNotFoundError(f"No se encuentra el archivo HEF: {self.path}")
                     
-                    # Configurar la red
-                    self.configure_params = self.hailo.ConfigureParams.create_from_hef(self.hef, self.device)
-                    self.configure_result = self.hef.configure(self.device, self.configure_params)
-                    
-                    # Configurar streams para inferencia
-                    self.input_vstreams_params = []
-                    self.output_vstreams_params = []
-                    
-                    for in_info in self.configure_result.inputs_metadata:
-                        vstream_params = self.hailo.InputVStreamParams()
-                        vstream_params.input_vstream_info = in_info
-                        self.input_vstreams_params.append(vstream_params)
-                    
-                    for out_info in self.configure_result.outputs_metadata:
-                        vstream_params = self.hailo.OutputVStreamParams()
-                        vstream_params.output_vstream_info = out_info
-                        self.output_vstreams_params.append(vstream_params)
-                    
-                    # Crear streams
-                    self.infer_pipeline = self.hailo.InferVStreams(
-                        self.device, 
-                        self.input_vstreams_params, 
-                        self.output_vstreams_params
-                    )
+                    # Cargar HEF - Adaptado para 4.20
+                    try:
+                        self.hef = self.hailo.Hef(self.path)
+                        logger.info("HEF cargado correctamente")
+                        
+                        # Configurar la red
+                        logger.info("Configurando red neural...")
+                        self.configure_params = self.hailo.ConfigureParams.create_from_hef(self.hef, self.device)
+                        self.configure_result = self.hef.configure(self.device, self.configure_params)
+                        logger.info("Red configurada correctamente")
+                        
+                        # Configurar streams para inferencia
+                        logger.info("Configurando streams de inferencia...")
+                        self.input_vstreams_params = []
+                        self.output_vstreams_params = []
+                        
+                        # Procesando metadatos de entrada
+                        for in_info in self.configure_result.inputs_metadata:
+                            vstream_params = self.hailo.InputVStreamParams()
+                            vstream_params.input_vstream_info = in_info
+                            self.input_vstreams_params.append(vstream_params)
+                        
+                        # Procesando metadatos de salida
+                        for out_info in self.configure_result.outputs_metadata:
+                            vstream_params = self.hailo.OutputVStreamParams()
+                            vstream_params.output_vstream_info = out_info
+                            self.output_vstreams_params.append(vstream_params)
+                        
+                        # Crear flujo de inferencia
+                        logger.info("Creando pipeline de inferencia...")
+                        self.infer_pipeline = self.hailo.InferVStreams(
+                            self.device, 
+                            self.input_vstreams_params, 
+                            self.output_vstreams_params
+                        )
+                        logger.info("Pipeline de inferencia creado correctamente")
+                        
+                    except Exception as e:
+                        logger.error(f"Error en la configuración del modelo: {e}")
+                        raise
                 
                 def infer(self, frame):
-                    # Este es un placeholder - en una implementación real
-                    # aquí iría la lógica real de inferencia con Hailo
-                    # Pero como es complejo implementarla aquí, devolvemos
-                    # detecciones simuladas por ahora
+                    """Realiza inferencia en un frame."""
+                    # En la implementación real, aquí preprocesaríamos el frame y 
+                    # lo enviaríamos a través del pipeline de inferencia
+                    
+                    # Por ahora, para probar, devolvemos detecciones simuladas
+                    logger.debug(f"Simulando inferencia para modelo: {self.model_type}")
+                    
                     if self.model_type == "vehicle":
                         return [
                             ([100, 100, 200, 200], 0.85, 2),  # Un camión simulado
@@ -468,10 +516,10 @@ class ConstructionMonitor:
                         return []
             
             # Crear instancia del modelo
-            return HailoModelV4_13(hef_path, self.hailo_device, self.hailo_module, model_type)
+            return HailoModelV4_20(hef_path, self.hailo_device, self.hailo_module, model_type)
         
         except Exception as e:
-            logger.error(f"Error cargando modelo con API v4.13: {e}")
+            logger.error(f"Error cargando modelo con API v4.20: {e}")
             # Devolver un modelo dummy
             return self._create_dummy_model({"model_path": hef_path})
     
